@@ -79,8 +79,8 @@ a {
 }
 
 .badge.belum {
-  background: #fef3c7;
-  color: #92400e;
+  background: #f3f4f6;
+  color: #4b5563;
 }
 
 .badge.selesai {
@@ -138,4 +138,46 @@ h1, h2 {
 .muted-link {
   font-size: 0.9rem;
   margin-top: 10px;
+}
+
+:root {
+  --deadline-urgent-ink: #9a3412;
+  --deadline-urgent-bg: #ffedd5;
+  --deadline-overdue-ink: #991b1b;
+  --deadline-overdue-bg: #fee2e2;
+}
+
+.task-details { min-width: 0; overflow-wrap: anywhere; }
+.task-controls { flex-shrink: 0; }
+.task-badges, .task-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.task-actions { margin-top: 12px; }
+.task-badges .badge { white-space: nowrap; }
+.badge.deadline-urgent { background: var(--deadline-urgent-bg); color: var(--deadline-urgent-ink); }
+.badge.deadline-overdue { background: var(--deadline-overdue-bg); color: var(--deadline-overdue-ink); }
+.deadline-message { margin: 8px 0 0; font-size: 0.85rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.deadline-message.urgent { color: var(--deadline-urgent-ink); }
+.deadline-message.overdue { color: var(--deadline-overdue-ink); }
+.task-summary, .task-freshness { color: #4b5563; font-size: 0.85rem; }
+.task-summary { margin: -8px 0 24px; }
+.task-description { white-space: pre-wrap; }
+.task-list-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 24px 0 16px; }
+.task-list-header h2 { margin: 0; font-size: 1.1rem; }
+.task-freshness { margin: 6px 0 0; }
+.btn.btn-secondary { background: white; color: #1f2430; border: 1px solid #d1d5db; }
+button:disabled { cursor: wait; opacity: 0.65; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+  outline: 2px solid #1f2430; outline-offset: 3px;
+}
+form label { font-size: 0.85rem; font-weight: 600; }
+
+@media (max-width: 640px) {
+  .container { padding: 20px 16px; }
+  .task-card { flex-direction: column; gap: 16px; }
+  .task-controls { width: 100%; }
+  .task-badges, .task-actions { justify-content: flex-start; }
+  .task-actions .btn { flex: 1; }
+  .task-list-header { align-items: flex-start; }
+  .navbar { padding: 14px 16px; flex-wrap: wrap; gap: 12px; }
+  .navbar nav { gap: 12px; flex-wrap: wrap; }
+  input, select, textarea { min-width: 0; width: 100%; }
 }

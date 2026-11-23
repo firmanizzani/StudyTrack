@@ -19,7 +19,7 @@ import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, "db.json");
+const DB_PATH = process.env.STUDYTRACK_DB_PATH || path.join(__dirname, "db.json");
 
 /**
  * Membuat data awal (seed) yang sesuai dengan contoh data pada dokumen studi

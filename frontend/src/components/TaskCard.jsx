@@ -1,58 +1,39 @@
 import React from "react";
+import { formatDeadline, formatRemaining } from "../deadlineDisplay.js";
 
-/**
- * Memformat deadline ke tampilan lokal Indonesia, contoh: "03 Jul 2026, 23.59".
- *
- * @param {string} deadline Tanggal dan jam deadline dari API.
- * @returns {string}
- */
-function formatDeadline(deadline) {
-  const d = new Date(deadline);
-  return d.toLocaleString("id-ID", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-}
+/** Deadline category and ordering are supplied by the backend. */
+export default function TaskCard({ task, onToggleStatus, onDelete, disabled = false }) {
+  const completed = task.status === "selesai";
+  const category = completed ? "completed" : task.deadline_category;
+  const warning = category === "urgent" || category === "overdue";
 
-/**
- * Card satu tugas pada halaman Daftar Tugas.
- *
- * @param {object} props
- * @param {object} props.task Data tugas dari API (termasuk `mata_kuliah`).
- * @param {(task: object) => void} props.onToggleStatus Dipanggil saat tombol status ditekan.
- * @param {(id: number) => void} props.onDelete Dipanggil saat tombol hapus ditekan.
- *
- * CATATAN UNTUK PESERTA STUDI KASUS:
- * Komponen inilah yang merender setiap card tugas pada halaman Daftar Tugas.
- * Penanda visual "Mendekati Deadline" untuk fitur baru kemungkinan besar
- * akan ditambahkan di sekitar sini (atau dengan menambah prop baru ke
- * komponen ini), tergantung rancangan Anda.
- */
-export default function TaskCard({ task, onToggleStatus, onDelete }) {
   return (
-    <div className="card task-card">
-      <div>
-        <strong>{task.judul}</strong>
+    <article className={`card task-card task-${category || "normal"}`}>
+      <div className="task-details">
+        <strong>{completed ? <s>{task.judul}</s> : task.judul}</strong>
         <div className="meta">{task.mata_kuliah}</div>
         <div className="meta">Deadline: {formatDeadline(task.deadline)}</div>
-        {task.deskripsi && <div className="meta">{task.deskripsi}</div>}
+        {warning && <p className={`deadline-message ${category}`}>
+          {formatRemaining(task.remaining_seconds, category)}
+        </p>}
+        {task.deskripsi && <div className="meta task-description">{task.deskripsi}</div>}
       </div>
-      <div style={{ textAlign: "right" }}>
-        <span className={`badge ${task.status}`}>
-          {task.status === "selesai" ? "Selesai" : "Belum"}
-        </span>
-        <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-          <button className="btn" onClick={() => onToggleStatus(task)}>
-            {task.status === "selesai" ? "Tandai Belum" : "Tandai Selesai"}
+      <div className="task-controls">
+        <div className="task-badges">
+          {warning && <span className={`badge deadline-${category}`}>
+            {category === "urgent" ? "Mendekati Deadline" : "Terlambat"}
+          </span>}
+          <span className={`badge ${task.status}`}>{completed ? "Selesai" : "Belum"}</span>
+        </div>
+        <div className="task-actions">
+          <button className="btn" onClick={() => onToggleStatus(task)} disabled={disabled}>
+            {completed ? "Tandai Belum" : "Tandai Selesai"}
           </button>
-          <button className="btn" onClick={() => onDelete(task.id)}>
+          <button className="btn btn-secondary" onClick={() => onDelete(task.id)} disabled={disabled}>
             Hapus
           </button>
         </div>
       </div>
-    </div>
+    </article>
   );
 }
