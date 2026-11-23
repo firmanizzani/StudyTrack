@@ -1,93 +1,111 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import express from "express";
-import jwt from "jsonwebtoken";
+import { readFile } from "node:fs/promises";
+import { newDb, DataType } from "pg-mem";
+import { createApp } from "../app.js";
+import { createStore } from "../store.js";
 
-test("task API: authenticated cross-course reminders, ownership, writes, and validation", async (t) => {
-  const directory = await mkdtemp(path.join(tmpdir(), "studytrack-test-"));
-  const dbPath = path.join(directory, "db.json");
-  process.env.STUDYTRACK_DB_PATH = dbPath;
-  const { default: taskRoutes } = await import("../routes/tasks.js");
-  const { JWT_SECRET } = await import("../config.js");
-  const now = Date.now();
-  const date = (offset) => new Date(now + offset * 3600000).toISOString();
-  const makeTask = (id, user_id, mata_kuliah_id, offset, status = "belum") => ({
-    id, user_id, mata_kuliah_id, judul: `Task ${id}`, deadline: date(offset), status, created_at: date(-48)
-  });
-  const initial = {
-    nextIds: { task: 6 }, users: [],
-    courses: [{ id: 1, user_id: 1, name: "Database Systems" }, { id: 2, user_id: 1, name: "Data Structures" }, { id: 3, user_id: 2, name: "Other student's course" }],
-    tasks: [makeTask(1, 1, 1, 48), makeTask(2, 1, 2, 1), makeTask(3, 1, 1, -1),
-      makeTask(4, 1, 2, -2, "selesai"), makeTask(5, 2, 3, 0.5)]
-  };
-  await writeFile(dbPath, JSON.stringify(initial));
-  const app = express();
-  app.use(express.json());
-  app.use("/api/tasks", taskRoutes);
-  const server = app.listen(0, "127.0.0.1");
+// Run the actual SQL repository and schema without touching a live Neon database.
+test("PostgreSQL API: auth, ownership, reminders, persistence, and cascades", async (t) => {
+  const memory = newDb();
+  memory.public.registerFunction({ name: "trim", args: [DataType.text], returns: DataType.text, implementation: (value) => value.trim() });
+  memory.public.registerFunction({ name: "length", args: [DataType.text], returns: DataType.integer, implementation: (value) => value.length });
+  memory.public.none(await readFile(new URL("../schema.sql", import.meta.url), "utf8"));
+  const { Pool } = memory.adapters.createPg();
+  const pool = new Pool();
+  const store = createStore(pool);
+  const server = createApp(store).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
-  t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    delete process.env.STUDYTRACK_DB_PATH;
-    await rm(directory, { recursive: true, force: true });
-  });
-  const base = `http://127.0.0.1:${server.address().port}/api/tasks`;
-  const token = jwt.sign({ sub: 1, nama: "Test Student", email: "student@example.test" }, JWT_SECRET);
-  const request = (url = "", method = "GET", body) => fetch(base + url, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
-  });
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); await pool.end(); });
+  const base = `http://127.0.0.1:${server.address().port}/api`;
+  const request = async (url, method = "GET", body, token) => {
+    const response = await fetch(base + url, { method,
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, body: await response.json(), headers: response.headers };
+  };
+  const a = await request("/auth/register", "POST", { nama: "Student A", email: "a@example.test", password: "test-password" });
+  const b = await request("/auth/register", "POST", { nama: "Student B", email: "b@example.test", password: "test-password" });
+  assert.equal(a.status, 201);
+  assert.equal(b.status, 201);
+  const token = a.body.token;
+  const otherToken = b.body.token;
+  const courses = [];
+  for (const name of ["Database Systems", "Data Structures"]) {
+    const course = await request("/courses", "POST", { name }, token);
+    assert.equal(course.status, 201);
+    courses.push(course.body.course);
+  }
+  const otherCourse = (await request("/courses", "POST", { name: "Other student's course" }, otherToken)).body.course;
+  const date = (hours) => new Date(Date.now() + hours * 3600000).toISOString();
+  const tasks = [];
+  for (const [judul, hours, course] of [["Normal", 48, courses[0]], ["Urgent", 1, courses[1]], ["Overdue", -1, courses[0]], ["Completed", -2, courses[1]]]) {
+    const result = await request("/tasks", "POST", { judul, deadline: date(hours), mata_kuliah_id: course.id }, token);
+    assert.equal(result.status, 201);
+    tasks.push(result.body.task);
+  }
+  await request(`/tasks/${tasks[3].id}`, "PUT", { status: "selesai" }, token);
+  const foreign = (await request("/tasks", "POST", { judul: "Private B", deadline: date(1), mata_kuliah_id: otherCourse.id }, otherToken)).body.task;
 
-  await t.test("reject unauthenticated requests", async () => {
-    assert.equal((await fetch(base)).status, 401);
+  await t.test("auth, duplicate registration, and health", async () => {
+    assert.equal((await request("/tasks")).status, 401);
+    assert.equal((await request("/auth/login", "POST", { email: "A@EXAMPLE.TEST", password: "test-password" })).status, 200);
+    assert.equal((await request("/auth/login", "POST", { email: "a@example.test", password: "wrong" })).status, 401);
+    assert.equal((await request("/auth/register", "POST", { nama: "Duplicate", email: "A@EXAMPLE.TEST", password: "test-password" })).status, 409);
+    assert.equal((await request("/auth/register", "POST", { nama: {}, email: "bad", password: [] })).status, 400);
+    assert.equal((await request("/health")).body.database, "connected");
+    assert.equal((await request("/dev/reset", "POST")).status, 404);
+    assert.ok(!(await request("/auth/me", "GET", undefined, token)).body.user.password_hash);
   });
-  await t.test("return only this user's tasks across courses in priority order", async () => {
-    const res = await request();
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.deepEqual(body.tasks.map((task) => task.id), [2, 3, 1, 4]);
-    assert.deepEqual(body.tasks.map((task) => task.deadline_category), ["urgent", "overdue", "normal", "completed"]);
-    assert.equal(body.tasks[0].mata_kuliah, "Data Structures");
-    assert.ok(Number.isFinite(Date.parse(body.evaluated_at)));
-    assert.deepEqual(JSON.parse(await readFile(dbPath, "utf8")), initial);
+  await t.test("return all owned courses' tasks in reminder order with uncached responses", async () => {
+    const result = await request("/tasks", "GET", undefined, token);
+    assert.deepEqual(result.body.tasks.map((task) => task.judul), ["Urgent", "Overdue", "Normal", "Completed"]);
+    assert.deepEqual(result.body.tasks.map((task) => task.deadline_category), ["urgent", "overdue", "normal", "completed"]);
+    assert.equal(result.body.tasks[0].mata_kuliah, "Data Structures");
+    assert.ok(Number.isFinite(Date.parse(result.body.evaluated_at)));
+    assert.equal(result.headers.get("cache-control"), "no-store");
+    assert.equal((await pool.query("SELECT * FROM tasks WHERE id = $1", [tasks[1].id])).rows[0].deadline_category, undefined);
   });
-  await t.test("prevent another user's task access and changes", async () => {
-    assert.equal((await request("/5")).status, 404);
-    assert.equal((await request("/5", "PUT", { status: "selesai" })).status, 404);
-    assert.equal((await request("/5", "DELETE")).status, 404);
-    assert.equal((await request("", "POST", { mata_kuliah_id: 3, judul: "Forbidden", deadline: date(1) })).status, 400);
-  });
-  await t.test("completion suppresses overdue and reopening restores it", async () => {
-    assert.equal((await request("/3", "PUT", { status: "selesai" })).status, 200);
-    let list = await (await request()).json();
-    assert.equal(list.tasks.find((task) => task.id === 3).deadline_category, "completed");
-    await request("/3", "PUT", { status: "belum" });
-    list = await (await request()).json();
-    assert.equal(list.tasks.find((task) => task.id === 3).deadline_category, "overdue");
-  });
-  await t.test("invalid dates and status never persist partial updates", async () => {
-    const before = await readFile(dbPath, "utf8");
-    for (const deadline of ["bad", "2026-02-30T10:00", {}, null]) {
-      assert.equal((await request("", "POST", { mata_kuliah_id: 1, judul: "Invalid", deadline })).status, 400);
-      assert.equal((await request("/1", "PUT", { judul: "Changed", deadline })).status, 400);
+  await t.test("enforce ownership for task and course reads and mutations", async () => {
+    for (const [method, body] of [["GET", undefined], ["PUT", { status: "selesai" }], ["DELETE", undefined]]) {
+      assert.equal((await request(`/tasks/${foreign.id}`, method, body, token)).status, 404);
     }
-    assert.equal((await request("/1", "PUT", { judul: "Changed", status: "bad" })).status, 400);
-    assert.equal(await readFile(dbPath, "utf8"), before);
+    assert.equal((await request(`/courses/${otherCourse.id}`, "PUT", { name: "Forbidden" }, token)).status, 404);
+    assert.equal((await request(`/courses/${otherCourse.id}`, "DELETE", undefined, token)).status, 404);
+    assert.equal((await request("/tasks", "POST", { judul: "Forbidden", deadline: date(1), mata_kuliah_id: otherCourse.id }, token)).status, 400);
+    assert.equal((await request("/courses", "GET", undefined, token)).body.courses.length, 2);
+    assert.equal((await request("/tasks/not-an-id", "GET", undefined, token)).status, 404);
   });
-  await t.test("new and edited deadlines are reflected on the next list request", async () => {
-    const res = await request("", "POST", { mata_kuliah_id: 1, judul: "New task", deadline: date(2) });
-    assert.equal(res.status, 201);
-    const { task } = await res.json();
-    let list = await (await request()).json();
-    assert.equal(list.tasks.find((item) => item.id === task.id).deadline_category, "urgent");
-    await request(`/${task.id}`, "PUT", { deadline: date(48) });
-    list = await (await request()).json();
-    assert.equal(list.tasks.find((item) => item.id === task.id).deadline_category, "normal");
-    assert.equal((await request(`/${task.id}`, "DELETE")).status, 200);
-    list = await (await request()).json();
-    assert.ok(!list.tasks.some((item) => item.id === task.id));
+  await t.test("invalid deadlines or status do not partially update rows", async () => {
+    for (const deadline of ["bad", "2026-02-30T10:00", {}, null]) {
+      assert.equal((await request(`/tasks/${tasks[0].id}`, "PUT", { judul: "Changed", deadline }, token)).status, 400);
+      assert.equal((await request("/tasks", "POST", { judul: "Invalid", deadline, mata_kuliah_id: courses[0].id }, token)).status, 400);
+    }
+    assert.equal((await request(`/tasks/${tasks[0].id}`, "PUT", { judul: "Changed", status: "bad" }, token)).status, 400);
+    assert.equal((await store.findTask(tasks[0].id, a.body.user.id)).judul, "Normal");
+  });
+  await t.test("complete, reopen, and edit deadlines without stale categories", async () => {
+    const id = tasks[2].id;
+    await request(`/tasks/${id}`, "PUT", { status: "selesai" }, token);
+    assert.equal((await request("/tasks", "GET", undefined, token)).body.tasks.find((task) => task.id === id).deadline_category, "completed");
+    await request(`/tasks/${id}`, "PUT", { status: "belum", deadline: date(2) }, token);
+    assert.equal((await request("/tasks", "GET", undefined, token)).body.tasks.find((task) => task.id === id).deadline_category, "urgent");
+    await request(`/tasks/${id}`, "PUT", { deadline: "2026-07-02T10:00" }, token);
+    assert.equal((await store.findTask(id, a.body.user.id)).deadline, "2026-07-02T03:00:00.000Z");
+  });
+  await t.test("parallel inserts retain all rows with unique database-generated IDs", async () => {
+    const result = await Promise.all(Array.from({ length: 6 }, (_, i) => request("/tasks", "POST", {
+      judul: `Parallel ${i}`, deadline: date(3), mata_kuliah_id: courses[0].id
+    }, token)));
+    assert.ok(result.every((item) => item.status === 201));
+    assert.equal(new Set(result.map((item) => item.body.task.id)).size, 6);
+    assert.equal((await store.listTasks(a.body.user.id)).length, 10);
+  });
+  await t.test("course deletion cascades only to that course's tasks", async () => {
+    assert.equal((await request(`/courses/${courses[0].id}`, "DELETE", undefined, token)).status, 200);
+    assert.ok((await store.listTasks(a.body.user.id)).every((task) => task.mata_kuliah_id === courses[1].id));
+    assert.ok(await store.findTask(foreign.id, b.body.user.id));
+    assert.equal((await request(`/tasks/${tasks[1].id}`, "DELETE", undefined, token)).status, 200);
+    assert.equal(await store.findTask(tasks[1].id, a.body.user.id), null);
   });
 });

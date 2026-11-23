@@ -1,0 +1,4 @@
+backend/.env
+backend/.env.*
+backend/db.json
+**/test/**
